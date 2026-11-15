@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Generator
 from datetime import UTC, datetime
 
@@ -18,6 +19,7 @@ from app.models import (
     EnrollmentSampleImage,
     EnrollmentSession,
 )
+from app.offline_services import issue_offline_package, verify_offline_attendance
 from app.reports import csv_stream, enrollment_report_rows, verification_report_rows
 from app.schemas import (
     CaptureMetadata,
@@ -35,6 +37,8 @@ from app.schemas import (
     MobileEnrollmentCreate,
     MobileProfileResponse,
     MobileVerificationCreate,
+    OfflinePackageResponse,
+    OfflineVerificationResponse,
     ProfileResponse,
     ReviewRequest,
     SessionCreateResponse,
@@ -134,14 +138,10 @@ def enrollment_samples_response(
                 checksum_sha256=stored_image.checksum_sha256,
                 capture_metadata=json.loads(stored_image.capture_metadata),
                 quality={
-                    key: value
-                    for key, value in json.loads(sample.quality).items()
-                    if not key.startswith("_")
+                    key: value for key, value in json.loads(sample.quality).items() if not key.startswith("_")
                 },
                 created_at=stored_image.created_at,
-                image_url=(
-                    f"/internal/v1/enrollments/{enrollment.id}/samples/{sample.id}/image"
-                ),
+                image_url=(f"/internal/v1/enrollments/{enrollment.id}/samples/{sample.id}/image"),
             )
             for sample, stored_image in rows
         ],
@@ -221,9 +221,35 @@ async def mobile_profile(
     )
 
 
-@mobile_router.post(
-    "/enrollments", response_model=SessionCreateResponse, status_code=201, tags=["mobile"]
+@mobile_router.get(
+    "/offline-package",
+    response_model=OfflinePackageResponse,
+    tags=["mobile", "offline-biometric"],
 )
+async def mobile_offline_package(
+    request: Request,
+    subject_id: str = Depends(require_mobile_subject),
+    db: Session = Depends(get_db),
+    device_id: str = Header(..., alias="X-Device-Id"),
+    device_public_key: str = Header(..., alias="X-Device-Public-Key"),
+) -> OfflinePackageResponse:
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", device_id):
+        raise HTTPException(status_code=422, detail="X-Device-Id is invalid")
+    container = get_container(request)
+    if not container.offline_package_limiter.allow(subject_id):
+        raise HTTPException(status_code=429, detail="Offline package rate limit exceeded")
+    return OfflinePackageResponse.model_validate(
+        issue_offline_package(
+            db,
+            container,
+            subject_id=subject_id,
+            device_id=device_id,
+            device_public_key_header=device_public_key,
+        )
+    )
+
+
+@mobile_router.post("/enrollments", response_model=SessionCreateResponse, status_code=201, tags=["mobile"])
 async def mobile_enrollment_start(
     payload: MobileEnrollmentCreate,
     request: Request,
@@ -248,9 +274,7 @@ async def mobile_enrollment_start(
     )
 
 
-@mobile_router.post(
-    "/verifications", response_model=SessionCreateResponse, status_code=201, tags=["mobile"]
-)
+@mobile_router.post("/verifications", response_model=SessionCreateResponse, status_code=201, tags=["mobile"])
 async def mobile_verification_start(
     _payload: MobileVerificationCreate,
     request: Request,
@@ -348,9 +372,7 @@ def enrollment_list(
     )
 
 
-@internal_router.get(
-    "/enrollments/uploaded", response_model=EnrollmentListResponse, tags=["enrollment"]
-)
+@internal_router.get("/enrollments/uploaded", response_model=EnrollmentListResponse, tags=["enrollment"])
 def enrollment_uploaded_list(
     db: Session = Depends(get_db),
     status_filter: str | None = Query(default=None, alias="status", max_length=32),
@@ -491,9 +513,7 @@ async def enrollment_capture(
         capture_metadata=parse_capture_metadata(capture_metadata),
     )
     enrollment = db.get(EnrollmentSession, enrollment_id)
-    quality = {
-        key: value for key, value in json.loads(sample.quality).items() if not key.startswith("_")
-    }
+    quality = {key: value for key, value in json.loads(sample.quality).items() if not key.startswith("_")}
     return CaptureResponse(
         sample_id=sample.id,
         enrollment_id=enrollment_id,
@@ -782,6 +802,52 @@ def verification_start(
         challenge=json.loads(verification.challenge),
         upload_token=token,
         expires_at=verification.expires_at,
+    )
+
+
+@internal_router.post(
+    "/offline-verifications",
+    response_model=OfflineVerificationResponse,
+    tags=["offline-biometric"],
+)
+async def offline_verification(
+    request: Request,
+    subject_id: str = Form(...),
+    model_id: str = Form(...),
+    face_package_id: str = Form(...),
+    captured_at: datetime = Form(...),
+    liveness_method: str = Form(...),
+    evidence_hash: str = Form(...),
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> OfflineVerificationResponse:
+    client = request.client.host if request.client else "unknown"
+    container = get_container(request)
+    if not container.offline_verification_limiter.allow(client):
+        raise HTTPException(status_code=429, detail="Offline verification rate limit exceeded")
+    if captured_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="captured_at must include a timezone offset")
+    if len(model_id) > 160 or not model_id:
+        raise HTTPException(status_code=422, detail="model_id is invalid")
+    if len(face_package_id) > 64 or not face_package_id:
+        raise HTTPException(status_code=422, detail="face_package_id is invalid")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", liveness_method):
+        raise HTTPException(status_code=422, detail="liveness_method is invalid")
+    if not re.fullmatch(r"(?:sha256:)?[0-9a-fA-F]{64}", evidence_hash):
+        raise HTTPException(status_code=422, detail="evidence_hash must be a SHA-256 digest")
+    content = await read_image(image, container)
+    return OfflineVerificationResponse.model_validate(
+        verify_offline_attendance(
+            db,
+            container,
+            subject_id=subject_id,
+            model_id=model_id,
+            face_package_id=face_package_id,
+            captured_at=captured_at,
+            liveness_method=liveness_method,
+            evidence_hash=evidence_hash,
+            image_bytes=content,
+        )
     )
 
 

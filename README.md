@@ -368,6 +368,46 @@ bukan threshold final; kalibrasikan menggunakan data uji sah sebelum produksi.
 `OPENCV_MODEL_LICENSE_CONFIRMED=true` adalah pernyataan operator bahwa teks lisensi, provenance,
 dan penggunaan model telah ditinjau. Simpan file lisensi dan `manifest.json` bersama deployment.
 
+## Paket wajah offline dan sinkronisasi
+
+Paket offline hanya diterbitkan untuk profil dan template aktif yang memakai model produksi saat ini.
+Perangkat wajib mengirim `X-Device-Id` dan public key RSA X.509 DER Base64 milik Android Keystore:
+
+```http
+GET /mobile/v1/offline-package
+Authorization: Bearer <token-login>
+X-Device-Id: <device-terdaftar>
+X-Device-Public-Key: <base64-x509-der-rsa>
+```
+
+Embedding database tetap terenkripsi. Saat penerbitan, embedding hanya didekripsi di memori, lalu
+dienkripsi ulang memakai AES-256-GCM dengan kunci sekali pakai yang dibungkus RSA-OAEP. Paket berlaku
+maksimal tujuh hari. Reset, pencabutan, dan penggantian template mencabut paket lama serta menaikkan
+`templateVersion`.
+
+Buat pasangan kunci signing terpisah dari kunci enkripsi database:
+
+```powershell
+python scripts/generate_offline_signing_key.py
+```
+
+Simpan nilai `OFFLINE_SIGNING_PRIVATE_KEY_B64` hanya di secret manager server. Salin public key yang
+dihasilkan ke environment mobile sebagai `EXPO_PUBLIC_FACE_OFFLINE_PUBLIC_KEY`. Nilai tersebut adalah
+X.509 DER Base64 dan aman didistribusikan. Rotasi kunci dilakukan dengan mengganti
+`OFFLINE_SIGNING_KEY_ID`; mobile perlu mempertahankan public key lama selama paket lama masih berlaku.
+
+AbsenWeb menyinkronkan bukti offline untuk verifikasi ulang server melalui:
+
+```http
+POST /internal/v1/offline-verifications
+X-Service-Key: <internal-key>
+Content-Type: multipart/form-data
+```
+
+Field wajib: `subject_id`, `model_id`, `face_package_id`, `captured_at` (dengan zona waktu),
+`liveness_method`, `evidence_hash` (SHA-256 foto), dan `image`. Skor dari perangkat tidak diterima.
+Foto hanya diproses di memori dan tidak disimpan.
+
 ## Batasan keamanan yang masih harus diselesaikan sebelum produksi
 
 - active liveness (kedip dan gerakan kepala) saat ini dinilai pada aplikasi dan buktinya divalidasi terhadap challenge acak dari service;

@@ -50,10 +50,7 @@ class OpenCVFaceEngine:
             5000,
         )
         self._recognizer = cv2.FaceRecognizerSF.create(str(self._recognizer_path), "")
-        self._model_id = (
-            f"opencv-yunet-2023mar-sface-2021dec:"
-            f"{detector_digest[:16]}:{recognizer_digest[:16]}"
-        )
+        self._model_id = f"opencv-yunet-2023mar-sface-2021dec:{detector_digest[:16]}:{recognizer_digest[:16]}"
         # FaceDetectorYN.setInputSize mutates shared native state.
         self._inference_lock = Lock()
 
@@ -126,15 +123,11 @@ class OpenCVFaceEngine:
             "face_y": round(y, 3),
         }
         if raw_embedding is None:
-            return FaceAnalysisResult(
-                1, None, self.model_id, False, quality, "embedding_unavailable"
-            )
+            return FaceAnalysisResult(1, None, self.model_id, False, quality, "embedding_unavailable")
         try:
             embedding = normalize_embedding(np.asarray(raw_embedding, dtype=np.float32).reshape(-1))
         except ValueError:
-            return FaceAnalysisResult(
-                1, None, self.model_id, False, quality, "embedding_unavailable"
-            )
+            return FaceAnalysisResult(1, None, self.model_id, False, quality, "embedding_unavailable")
 
         return FaceAnalysisResult(
             face_count=1,

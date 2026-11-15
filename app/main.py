@@ -11,6 +11,8 @@ from app.container import Container
 from app.crypto import TemplateCipher
 from app.db import Database
 from app.engines.factory import create_face_engine
+from app.offline_crypto import OfflinePackageSigner
+from app.rate_limit import FixedWindowRateLimiter
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -18,7 +20,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(resolved.database_url)
     engine = create_face_engine(resolved)
     cipher = TemplateCipher(resolved.encryption_key)
-    container = Container(settings=resolved, database=database, engine=engine, cipher=cipher)
+    offline_signer = (
+        OfflinePackageSigner(
+            resolved.offline_signing_private_key_b64,
+            resolved.offline_signing_key_id,
+        )
+        if resolved.offline_signing_private_key_b64
+        else None
+    )
+    container = Container(
+        settings=resolved,
+        database=database,
+        engine=engine,
+        cipher=cipher,
+        offline_signer=offline_signer,
+        offline_package_limiter=FixedWindowRateLimiter(resolved.offline_package_rate_limit_per_minute),
+        offline_verification_limiter=FixedWindowRateLimiter(
+            resolved.offline_verification_rate_limit_per_minute
+        ),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -40,8 +60,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=resolved.allowed_origins,
             allow_credentials=False,
-            allow_methods=["GET", "POST"],
-            allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Service-Key"],
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Service-Key",
+                "X-Device-Id",
+                "X-Device-Public-Key",
+            ],
         )
     app.include_router(router)
     return app

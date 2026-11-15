@@ -37,6 +37,34 @@ class Database:
                     )
                 )
 
+        inspector = inspect(self.engine)
+        profile_columns = {column["name"] for column in inspector.get_columns("biometric_profiles")}
+        if "template_version" not in profile_columns:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE biometric_profiles "
+                        "ADD COLUMN template_version INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "UPDATE biometric_profiles SET template_version = 1 "
+                        "WHERE active_template_id IS NOT NULL"
+                    )
+                )
+
+        inspector = inspect(self.engine)
+        template_columns = {column["name"] for column in inspector.get_columns("biometric_templates")}
+        if "template_version" not in template_columns:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE biometric_templates "
+                        "ADD COLUMN template_version INTEGER NOT NULL DEFAULT 1"
+                    )
+                )
+
     def session(self) -> Generator[Session, None, None]:
         db = self.session_factory()
         try:

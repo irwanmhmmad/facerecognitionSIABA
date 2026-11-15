@@ -190,6 +190,28 @@ class VerificationCaptureResponse(BaseModel):
     reason_code: str | None
 
 
+class OfflinePackageData(BaseModel):
+    payload: str
+    signature: str
+    key_id: str
+
+
+class OfflinePackageResponse(BaseModel):
+    status: Literal["Success"] = "Success"
+    message: str | None = None
+    data: OfflinePackageData
+
+
+class OfflineVerificationResponse(BaseModel):
+    verification_id: str
+    match: bool
+    score: float
+    threshold: float
+    model_id: str
+    template_version: int
+    reason_code: str | None
+
+
 class MessageResponse(BaseModel):
     status: str
     message: str

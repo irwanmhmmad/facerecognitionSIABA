@@ -19,6 +19,7 @@ from app.models import (
     EnrollmentSample,
     EnrollmentSampleImage,
     EnrollmentSession,
+    OfflineBiometricPackage,
     VerificationSession,
     utc_now,
 )
@@ -92,16 +93,24 @@ def _upload_token(container: Container, purpose: str, session_id: str, subject_i
 def _discard_enrollment_evidence(db: Session, enrollment_id: str) -> None:
     """Remove temporary photos and per-photo embeddings once review no longer needs them."""
 
-    samples = db.scalars(
-        select(EnrollmentSample).where(EnrollmentSample.enrollment_id == enrollment_id)
-    )
+    samples = db.scalars(select(EnrollmentSample).where(EnrollmentSample.enrollment_id == enrollment_id))
     for sample in samples:
         sample.encrypted_embedding = None
-    db.execute(
-        delete(EnrollmentSampleImage).where(
-            EnrollmentSampleImage.enrollment_id == enrollment_id
+    db.execute(delete(EnrollmentSampleImage).where(EnrollmentSampleImage.enrollment_id == enrollment_id))
+
+
+def _revoke_offline_packages(db: Session, subject_id: str, now: datetime) -> int:
+    packages = list(
+        db.scalars(
+            select(OfflineBiometricPackage).where(
+                OfflineBiometricPackage.subject_id == subject_id,
+                OfflineBiometricPackage.revoked_at.is_(None),
+            )
         )
     )
+    for package in packages:
+        package.revoked_at = now
+    return len(packages)
 
 
 def create_enrollment(
@@ -293,11 +302,7 @@ def complete_enrollment(
     # Do not allow an enrollment to enter the review queue unless every accepted
     # sample has its encrypted temporary image available.
     stored_images = list(
-        db.scalars(
-            select(EnrollmentSampleImage).where(
-                EnrollmentSampleImage.enrollment_id == enrollment.id
-            )
-        )
+        db.scalars(select(EnrollmentSampleImage).where(EnrollmentSampleImage.enrollment_id == enrollment.id))
     )
     sample_ids = {sample.id for sample in samples}
     stored_sample_ids = {image.sample_id for image in stored_images}
@@ -442,16 +447,25 @@ def activate_enrollment(
         raise HTTPException(status_code=409, detail="Enrollment profile is incomplete")
     template = _build_candidate_template(db, container, enrollment)
 
-    previous_templates = db.scalars(
-        select(BiometricTemplate).where(
-            BiometricTemplate.subject_id == enrollment.subject_id,
-            BiometricTemplate.status == "active",
+    previous_templates = list(
+        db.scalars(
+            select(BiometricTemplate).where(
+                BiometricTemplate.subject_id == enrollment.subject_id,
+                BiometricTemplate.status == "active",
+            )
         )
     )
     now = utc_now()
     for previous in previous_templates:
         previous.status = "revoked"
         previous.revoked_at = now
+
+    # A reset increments the version immediately. A direct replacement increments it here.
+    # This makes every package from an older biometric lifecycle unambiguously stale.
+    if previous_templates or profile.template_version == 0:
+        profile.template_version += 1
+    template.template_version = profile.template_version
+    revoked_package_count = _revoke_offline_packages(db, enrollment.subject_id, now)
 
     template.status = "active"
     template.activated_at = now
@@ -467,6 +481,10 @@ def activate_enrollment(
         entity_type="biometric_template",
         entity_id=template.id,
         subject_id=enrollment.subject_id,
+        metadata={
+            "template_version": template.template_version,
+            "revoked_offline_package_count": revoked_package_count,
+        },
     )
     db.commit()
     return enrollment, template
@@ -534,12 +552,7 @@ def create_verification(
         if profile and profile.active_template_id
         else None
     )
-    if (
-        not profile
-        or profile.status != "active"
-        or not template
-        or template.status != "active"
-    ):
+    if not profile or profile.status != "active" or not template or template.status != "active":
         raise HTTPException(status_code=409, detail="Subject has no active biometric template")
     if template.model_id != container.engine.model_id:
         raise HTTPException(
@@ -637,12 +650,15 @@ def revoke_profile(db: Session, *, subject_id: str, actor: str, reason: str | No
     if not profile or not profile.active_template_id:
         raise HTTPException(status_code=404, detail="Active biometric profile not found")
     template = db.get(BiometricTemplate, profile.active_template_id)
+    now = utc_now()
     if template:
         template.status = "revoked"
-        template.revoked_at = utc_now()
+        template.revoked_at = now
     previous_id = profile.active_template_id
     profile.active_template_id = None
     profile.status = "revoked"
+    profile.template_version += 1
+    revoked_package_count = _revoke_offline_packages(db, subject_id, now)
     _audit(
         db,
         actor=actor,
@@ -650,7 +666,12 @@ def revoke_profile(db: Session, *, subject_id: str, actor: str, reason: str | No
         entity_type="biometric_profile",
         entity_id=subject_id,
         subject_id=subject_id,
-        metadata={"template_id": previous_id, "reason": reason},
+        metadata={
+            "template_id": previous_id,
+            "reason": reason,
+            "template_version": profile.template_version,
+            "revoked_offline_package_count": revoked_package_count,
+        },
     )
     db.commit()
     return profile
@@ -670,19 +691,11 @@ def delete_templates_for_reenrollment(
     if not profile:
         raise HTTPException(status_code=404, detail="Biometric profile not found")
 
-    templates = list(
-        db.scalars(
-            select(BiometricTemplate).where(BiometricTemplate.subject_id == subject_id)
-        )
-    )
+    templates = list(db.scalars(select(BiometricTemplate).where(BiometricTemplate.subject_id == subject_id)))
 
     # A retried request after a successful reset must not cancel a new capture
     # session that the employee has already started.
-    if (
-        profile.status == "needs_recapture"
-        and profile.active_template_id is None
-        and not templates
-    ):
+    if profile.status == "needs_recapture" and profile.active_template_id is None and not templates:
         return profile, 0, 0
 
     now = utc_now()
@@ -690,9 +703,7 @@ def delete_templates_for_reenrollment(
         db.scalars(
             select(EnrollmentSession).where(
                 EnrollmentSession.subject_id == subject_id,
-                EnrollmentSession.status.in_(
-                    {"collecting", "pending_ktu_review", "pending_bkd_review"}
-                ),
+                EnrollmentSession.status.in_({"collecting", "pending_ktu_review", "pending_bkd_review"}),
             )
         )
     )
@@ -706,17 +717,15 @@ def delete_templates_for_reenrollment(
     deleted_template_ids = [template.id for template in templates]
     if deleted_template_ids:
         for enrollment in db.scalars(
-            select(EnrollmentSession).where(
-                EnrollmentSession.candidate_template_id.in_(deleted_template_ids)
-            )
+            select(EnrollmentSession).where(EnrollmentSession.candidate_template_id.in_(deleted_template_ids))
         ):
             enrollment.candidate_template_id = None
-        db.execute(
-            delete(BiometricTemplate).where(BiometricTemplate.subject_id == subject_id)
-        )
+        db.execute(delete(BiometricTemplate).where(BiometricTemplate.subject_id == subject_id))
 
     profile.active_template_id = None
     profile.status = "needs_recapture"
+    profile.template_version += 1
+    revoked_package_count = _revoke_offline_packages(db, subject_id, now)
     _audit(
         db,
         actor=actor,
@@ -728,15 +737,15 @@ def delete_templates_for_reenrollment(
             "deleted_template_ids": deleted_template_ids,
             "cancelled_enrollment_ids": [item.id for item in open_enrollments],
             "reason": reason,
+            "template_version": profile.template_version,
+            "revoked_offline_package_count": revoked_package_count,
         },
     )
     db.commit()
     return profile, len(deleted_template_ids), len(open_enrollments)
 
 
-def count_enrollments(
-    db: Session, status_filter: str | None, struktur_org_prefix: str | None = None
-) -> int:
+def count_enrollments(db: Session, status_filter: str | None, struktur_org_prefix: str | None = None) -> int:
     query = select(func.count()).select_from(EnrollmentSession)
     if status_filter:
         query = query.where(EnrollmentSession.status == status_filter)

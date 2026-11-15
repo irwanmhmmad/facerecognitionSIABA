@@ -33,15 +33,13 @@ LICENSES = (
     {
         "filename": "LICENSE-YUNET.txt",
         "url": (
-            "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
-            "face_detection_yunet/LICENSE"
+            "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/LICENSE"
         ),
     },
     {
         "filename": "LICENSE-SFACE.txt",
         "url": (
-            "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
-            "face_recognition_sface/LICENSE"
+            "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_recognition_sface/LICENSE"
         ),
     },
 )
@@ -57,13 +55,9 @@ def sha256_file(path: Path) -> str:
 
 def download(url: str, destination: Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".part")
-    request = urllib_request.Request(
-        url, headers={"User-Agent": "absen-face-service-model-fetcher"}
-    )
+    request = urllib_request.Request(url, headers={"User-Agent": "absen-face-service-model-fetcher"})
     try:
-        with urllib_request.urlopen(request, timeout=120) as response, temporary.open(
-            "wb"
-        ) as output:
+        with urllib_request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
             shutil.copyfileobj(response, output)
         temporary.replace(destination)
     finally:
@@ -91,8 +85,7 @@ def main() -> None:
         if actual != artifact["sha256"]:
             path.unlink(missing_ok=True)
             raise SystemExit(
-                f"Checksum mismatch for {artifact['filename']}: "
-                f"expected {artifact['sha256']}, got {actual}"
+                f"Checksum mismatch for {artifact['filename']}: expected {artifact['sha256']}, got {actual}"
             )
         manifest_artifacts.append({**artifact, "verified_sha256": actual})
         print(f"Verified {artifact['filename']} ({actual})")
@@ -108,9 +101,7 @@ def main() -> None:
         "artifacts": manifest_artifacts,
         "notice": "Review model licenses and training-data provenance before production use.",
     }
-    (destination / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+    (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"OpenCV models are ready in {destination}")
 
 

@@ -23,6 +23,7 @@ class BiometricProfile(Base):
     subject_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), default="not_registered", index=True)
     active_template_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    template_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
@@ -40,6 +41,7 @@ class BiometricTemplate(Base):
     embedding_dimension: Mapped[int] = mapped_column(Integer)
     model_id: Mapped[str] = mapped_column(String(160))
     sample_count: Mapped[int] = mapped_column(Integer)
+    template_version: Mapped[int] = mapped_column(Integer, default=1)
     quality_summary: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -125,6 +127,41 @@ class VerificationSession(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class OfflineBiometricPackage(Base):
+    __tablename__ = "offline_biometric_packages"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    device_id: Mapped[str] = mapped_column(String(128), index=True)
+    device_public_key_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    template_id: Mapped[str] = mapped_column(String(64), index=True)
+    template_version: Mapped[int] = mapped_column(Integer)
+    model_id: Mapped[str] = mapped_column(String(160))
+    signing_key_id: Mapped[str] = mapped_column(String(64))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OfflineVerification(Base):
+    __tablename__ = "offline_verifications"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("offver"))
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    package_id: Mapped[str] = mapped_column(String(64), index=True)
+    model_id: Mapped[str] = mapped_column(String(160))
+    template_version: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    liveness_method: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    score: Mapped[float] = mapped_column(Float, default=-1.0)
+    threshold: Mapped[float] = mapped_column(Float)
+    matched: Mapped[bool] = mapped_column(default=False)
+    reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class AuditLog(Base):
     __tablename__ = "biometric_audit_logs"
 
@@ -140,3 +177,8 @@ class AuditLog(Base):
 
 Index("ix_templates_subject_status", BiometricTemplate.subject_id, BiometricTemplate.status)
 Index("ix_enrollments_subject_status", EnrollmentSession.subject_id, EnrollmentSession.status)
+Index(
+    "ix_offline_packages_subject_version",
+    OfflineBiometricPackage.subject_id,
+    OfflineBiometricPackage.template_version,
+)

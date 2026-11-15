@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     absenweb_base_url: str = "http://127.0.0.1:8000"
     absenweb_profile_path: str = "/api/get-my-profile"
     mobile_auth_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+    offline_signing_private_key_b64: str = ""
+    offline_signing_key_id: str = Field(default="face-offline-2026-01", min_length=3, max_length=64)
+    offline_package_ttl_seconds: int = Field(default=604_800, ge=300, le=604_800)
+    offline_device_public_key_max_header_bytes: int = Field(default=4096, ge=512, le=16384)
+    offline_package_rate_limit_per_minute: int = Field(default=10, ge=1, le=600)
+    offline_verification_rate_limit_per_minute: int = Field(default=60, ge=1, le=6000)
 
     @property
     def encryption_key(self) -> str:
@@ -93,7 +99,10 @@ class Settings(BaseSettings):
             and self.face_engine == "opencv"
             and not self.opencv_model_license_confirmed
         ):
-            raise ValueError(
-                "OPENCV_MODEL_LICENSE_CONFIRMED=true is required for the OpenCV adapter"
-            )
+            raise ValueError("OPENCV_MODEL_LICENSE_CONFIRMED=true is required for the OpenCV adapter")
+        if (
+            self.offline_signing_private_key_b64
+            and self.offline_signing_private_key_b64 == self.biometric_encryption_key
+        ):
+            raise ValueError("Offline signing key must differ from BIOMETRIC_ENCRYPTION_KEY")
         return self

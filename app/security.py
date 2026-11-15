@@ -50,10 +50,7 @@ async def require_mobile_subject(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login token is required")
 
     settings = request.app.state.container.settings
-    profile_url = (
-        f"{settings.absenweb_base_url.rstrip('/')}"
-        f"/{settings.absenweb_profile_path.lstrip('/')}"
-    )
+    profile_url = f"{settings.absenweb_base_url.rstrip('/')}/{settings.absenweb_profile_path.lstrip('/')}"
     try:
         async with httpx.AsyncClient(timeout=settings.mobile_auth_timeout_seconds) as client:
             response = await client.get(
